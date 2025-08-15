@@ -35,111 +35,96 @@ pub const Packet = struct {
         }
     }
 
-    pub fn serialize(self: *const Packet, buffer: []u8) !usize {
-        var w_stream = std.io.fixedBufferStream(buffer);
-        var w = w_stream.writer();
+    pub fn serialize_into(self: *const Packet, buffer: []u8) !usize {
+        var i: usize = 0;
 
-        try w.writeInt(u32, self.src.sa.addr, .little);
-        try w.writeInt(u16, self.src.sa.port, .little);
-        try w.writeInt(u32, self.dest.sa.addr, .little);
-        try w.writeInt(u16, self.dest.sa.port, .little);
-        try w.writeByte(@intFromEnum(self.kind));
+        if (buffer.len < 13) return error.BufferTooSmall;
+
+        buffer[0] = @truncate(self.src.sa.addr >> 0);
+        buffer[1] = @truncate(self.src.sa.addr >> 8);
+        buffer[2] = @truncate(self.src.sa.addr >> 16);
+        buffer[3] = @truncate(self.src.sa.addr >> 24);
+
+        buffer[4] = @truncate(self.src.sa.port >> 0);
+        buffer[5] = @truncate(self.src.sa.port >> 8);
+
+        buffer[6] = @truncate(self.dest.sa.addr >> 0);
+        buffer[7] = @truncate(self.dest.sa.addr >> 8);
+        buffer[8] = @truncate(self.dest.sa.addr >> 16);
+        buffer[9] = @truncate(self.dest.sa.addr >> 24);
+
+        buffer[10] = @truncate(self.dest.sa.port >> 0);
+        buffer[11] = @truncate(self.dest.sa.port >> 8);
+
+        buffer[12] = @intFromEnum(self.kind);
+        i = 13;
 
         switch (self.kind) {
             .Data => |d| {
-                try w.writeInt(u32, d.seq, .little);
-                try w.writeInt(u32, @intCast(d.data.len), .little);
-                try w.writeAll(d.data);
+                if (buffer.len < 21 + d.data.len) return error.BufferTooSmall;
+
+                buffer[13] = @truncate(d.seq >> 0);
+                buffer[14] = @truncate(d.seq >> 8);
+                buffer[15] = @truncate(d.seq >> 16);
+                buffer[16] = @truncate(d.seq >> 24);
+
+                buffer[17] = @truncate(d.data.len >> 0);
+                buffer[18] = @truncate(d.data.len >> 8);
+                buffer[19] = @truncate(d.data.len >> 16);
+                buffer[20] = @truncate(d.data.len >> 24);
+                @memcpy(buffer[21 .. 21 + d.data.len], d.data);
+                i += 8 + d.data.len;
             },
             .Ack => |a| {
-                try w.writeInt(u32, a.ack, .little);
+                buffer[13] = @truncate(a.ack >> 0);
+                buffer[14] = @truncate(a.ack >> 8);
+                buffer[15] = @truncate(a.ack >> 16);
+                buffer[16] = @truncate(a.ack >> 24);
+                i += 4;
             },
-            .EoT => {},
+            .EoT => std.debug.print("serialized EoT", .{}),
         }
 
-        return w_stream.pos;
+        return i;
     }
 
-    pub fn deserialize(bytes: []u8) !Packet {
-        var stream = std.io.fixedBufferStream(bytes);
-        var r = stream.reader();
+    pub fn deserialize_into(self: *Packet, bytes: []u8) !void {
+        self.src = std.net.Ip4Address.init(bytes[0..4].*, @as(u16, bytes[4]) | (@as(u16, bytes[5]) << 8));
+        self.dest = std.net.Ip4Address.init(bytes[6..10].*, @as(u16, bytes[10]) | (@as(u16, bytes[11]) << 8));
 
-        const src_bytes = try r.readBytesNoEof(4);
-        const src_port = try r.readInt(u16, .little);
-        const src = std.net.Ip4Address.init(src_bytes, src_port);
-
-        const dest_bytes = try r.readBytesNoEof(4);
-        const dest_port = try r.readInt(u16, .little);
-        const dest = std.net.Ip4Address.init(dest_bytes, dest_port);
-
-        const kind_byte = try r.readByte();
+        const kind_byte = bytes[12];
         const kind_tag: PacketType = try std.meta.intToEnum(PacketType, kind_byte);
 
-        return switch (kind_tag) {
+        switch (kind_tag) {
             .Data => {
-                const seq: u32 = try r.readInt(u32, .little);
-                const data_len: usize = try r.readInt(u32, .little);
-                // if we get here we've already read 25 bytes
-                const data: []u8 = bytes[stream.pos .. stream.pos + data_len];
+                const data = &self.kind.Data;
+                data.seq = @as(u32, bytes[13]) |
+                    (@as(u32, bytes[14]) << 8) |
+                    (@as(u32, bytes[15]) << 16) |
+                    (@as(u32, bytes[16]) << 24);
 
-                return Packet{
-                    .src = src,
-                    .dest = dest,
-                    .kind = Kind{
-                        .Data = .{
-                            .seq = seq,
-                            .len = data_len,
-                            // .data = &[_]u8{},
-                            .data = data,
-                        },
-                    },
-                };
+                const len: usize = @as(u32, bytes[17]) |
+                    (@as(u32, bytes[18]) << 8) |
+                    (@as(u32, bytes[19]) << 16) |
+                    (@as(u32, bytes[20]) << 24);
+                if (len > data.data.len) {
+                    return error.DataBufferTooSmall;
+                }
+
+                data.len = len;
+                data.data = bytes[21 .. 21 + len];
             },
             .Ack => {
-                const ack = try r.readInt(u32, .little);
-                return Packet{
-                    .src = src,
-                    .dest = dest,
-                    .kind = Kind{ .Ack = .{ .ack = ack } },
-                };
+                const ack = &self.kind.Ack;
+                ack.ack = @as(u32, bytes[13]) |
+                    (@as(u32, bytes[14]) << 8) |
+                    (@as(u32, bytes[15]) << 16) |
+                    (@as(u32, bytes[16]) << 24);
             },
-            .EoT => Packet{
-                .src = src,
-                .dest = dest,
-                .kind = .EoT,
+            .EoT => {
+                self.kind = .EoT;
             },
-        };
-    }
-
-    pub fn deserialize_data(self: *Packet, bytes: []u8) !void {
-        var stream = std.io.fixedBufferStream(bytes);
-        var r = stream.reader();
-
-        const src_bytes = try r.readBytesNoEof(4);
-        const src_port = try r.readInt(u16, .little);
-        self.src = std.net.Ip4Address.init(src_bytes, src_port);
-
-        const dest_bytes = try r.readBytesNoEof(4);
-        const dest_port = try r.readInt(u16, .little);
-        self.dest = std.net.Ip4Address.init(dest_bytes, dest_port);
-
-        const kind_byte = try r.readByte();
-        const kind_tag: PacketType = try std.meta.intToEnum(PacketType, kind_byte);
-
-        if (kind_tag != .Data)
-            return error.UnexpectedPacketType;
-
-        const data = &self.kind.Data;
-        data.seq = try r.readInt(u32, .little);
-
-        const len: usize = try r.readInt(u32, .little);
-        if (len > data.data.len) {
-            // std.debug.print("len: {d} data len {d}\n", .{ len, data.data.len });
-            return error.DataBufferTooSmall;
         }
-
-        data.len = len;
-        try r.readNoEof(data.data[0..len]);
     }
 };
 
@@ -199,7 +184,8 @@ pub const PacketWindow = struct {
         pkt.src = data.src;
         pkt.dest = data.dest;
         kind_data.seq = data.seq;
-        std.mem.copyForwards(u8, kind_data.data, data.data);
+        kind_data.len = data.data.len;
+        @memmove(kind_data.data[0..data.data.len], data.data);
 
         self.count += 1;
         self.next_seq += 1;

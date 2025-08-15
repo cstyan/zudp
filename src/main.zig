@@ -15,7 +15,7 @@ const Error = error{
 var recv_buffer: [1024]u8 = [_]u8{0} ** 1024;
 var send_buffer: [1024]u8 = [_]u8{0} ** 1024;
 
-fn handle_recv_window(sock: std.posix.socket_t, expectedSeq: *u32) !void {
+fn handle_recv_window(sock: std.posix.socket_t, expectedSeq: *u32, prng: *std.Random.Xoshiro256) !void {
     var highest_seq_seen: ?u32 = null;
     var recv_count: usize = 0;
 
@@ -25,7 +25,6 @@ fn handle_recv_window(sock: std.posix.socket_t, expectedSeq: *u32) !void {
     var r: ?std.net.Ip4Address = null;
 
     // Only needed for random packet dropping, until we move that into it's own code path.
-    var prng = std.Random.DefaultPrng.init(@intCast(std.time.nanoTimestamp()));
     const rand = prng.random();
     var dropRand: f64 = undefined;
     const percent_drop: f64 = 1; // 1% chance
@@ -61,34 +60,32 @@ fn handle_recv_window(sock: std.posix.socket_t, expectedSeq: *u32) !void {
         }
 
         recv_count += 1;
+        try pkt.deserialize_into(&recv_buf);
 
-        const kind = try packet.check_kind(&recv_buf);
-
-        switch (kind) {
+        switch (pkt.kind) {
             .Data => {
-                try pkt.deserialize_data(&recv_buf);
                 r = pkt.dest;
                 s = pkt.src;
 
-                if (pkt.kind.Data.seq == expectedSeq.*) {
-                    dropRand = rand.float(f64) * 100.0; // random in [0, 100)
-                    if (dropRand < percent_drop) {
-                        continue;
-                    }
-
-                    std.debug.print("{s}", .{pkt.kind.Data.data[0..pkt.kind.Data.len]});
-                    highest_seq_seen = pkt.kind.Data.seq;
-                    expectedSeq.* += 1;
-                } else {
-                    // Out of order packet — ignore or handle according to your protocol/application needs.
+                if (pkt.kind.Data.seq != expectedSeq.*) {
+                    // Out of order, handle or skip early
+                    continue;
                 }
+
+                dropRand = rand.float(f64) * 100.0; // random in [0, 100)
+                if (dropRand < percent_drop) {
+                    continue;
+                }
+
+                highest_seq_seen = pkt.kind.Data.seq;
+                expectedSeq.* += 1;
             },
             .Ack => {
                 // Ignore incoming ACKs here if you want
             },
             .EoT => {
                 // we should ACK here and exit
-                std.debug.print("\n", .{});
+                std.debug.print("Got EoT, should exit\n", .{});
                 return error.ErrotEoT;
             },
         }
@@ -104,7 +101,7 @@ fn handle_recv_window(sock: std.posix.socket_t, expectedSeq: *u32) !void {
             },
         };
 
-        const n = try ack.serialize(@constCast(&send_buffer));
+        const n = try ack.serialize_into(@constCast(&send_buffer));
         // We could retry this send, but the sender will retransmit packets within the window that were not ack'd anyways.
         _ = try std.posix.sendto(sock, send_buffer[0..n], 0, &addr, addr_len);
     }
@@ -130,11 +127,11 @@ fn recv_loop() !void {
     );
     var expected_seq: u32 = 0;
     try std.posix.bind(sock, @ptrCast(&receiver.any), receiver.in.getOsSockLen());
+    var prng = std.Random.DefaultPrng.init(@intCast(std.time.nanoTimestamp()));
 
     while (true) {
-        handle_recv_window(sock, &expected_seq) catch |err| switch (err) {
+        handle_recv_window(sock, &expected_seq, &prng) catch |err| switch (err) {
             error.ErrotEoT => {
-                std.debug.print("got an eot", .{});
                 return;
             },
             else => return err,
@@ -146,7 +143,7 @@ fn send_window(sock: std.posix.socket_t, window: packet.PacketWindow) !u32 {
     for (0..window.count) |i| {
         const index = (window.head + i) % window.buffer.len;
         const pkt = window.buffer[index];
-        const n = try pkt.serialize(@constCast(&send_buffer));
+        const n = try pkt.serialize_into(@constCast(&send_buffer));
         _ = try std.posix.sendto(sock, send_buffer[0..n], 0, @ptrCast(&receiver.any), receiver.getOsSockLen());
     }
 
@@ -159,12 +156,23 @@ fn send_window(sock: std.posix.socket_t, window: packet.PacketWindow) !u32 {
         },
         else => return err,
     };
+    if (recv_len == 0) {
+        // This shouldn't be possible since the socket is blocking, but lets just be safe.
+        return error.NoAck;
+    }
 
-    const pkt_recv = try packet.Packet.deserialize(buf[0..recv_len]);
+    var ack = packet.Packet{
+        .src = sender.in,
+        .dest = receiver.in,
+        .kind = packet.Kind{ .Ack = .{
+            .ack = 0,
+        } },
+    };
+    try ack.deserialize_into(&buf);
 
-    switch (pkt_recv.kind) {
-        .Ack => |ack| {
-            return ack.ack;
+    switch (ack.kind) {
+        .Ack => |a| {
+            return a.ack;
         },
         else => std.debug.print("Unexpected packet received while waiting for ack\n", .{}),
     }
@@ -240,13 +248,12 @@ fn send_loop(allocator: std.mem.Allocator) !void {
         .dest = receiver.in,
         .kind = .EoT,
     };
-    const buffer = try allocator.alloc(u8, 1024);
-    const n = try eot.serialize(buffer);
-    _ = posix.sendto(sock, buffer[0..n], 0, @ptrCast(&receiver.any), receiver.getOsSockLen()) catch |err| {
+    const n = try eot.serialize_into(@constCast(&send_buffer));
+    _ = posix.sendto(sock, send_buffer[0..n], 0, @ptrCast(&receiver.any), receiver.getOsSockLen()) catch |err| {
         std.debug.print("error sending EoT to reciever, it should timeout anyways: {}", .{err});
         return err;
     };
-    allocator.free(buffer);
+    std.debug.print("sent EoT", .{});
 }
 
 const Mode = enum {
