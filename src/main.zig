@@ -11,9 +11,9 @@ const Error = error{
     ErrotEoT,
     NoAck,
 };
-
-var recv_buffer: [1024]u8 = [_]u8{0} ** 1024;
-var send_buffer: [1024]u8 = [_]u8{0} ** 1024;
+const sz = 1024 * 10;
+var recv_buffer: [sz]u8 = [_]u8{0} ** sz;
+var send_buffer: [sz]u8 = [_]u8{0} ** sz;
 
 fn handle_recv_window(sock: std.posix.socket_t, expectedSeq: *u32, prng: *std.Random.Xoshiro256) !void {
     var highest_seq_seen: ?u32 = null;
@@ -27,9 +27,9 @@ fn handle_recv_window(sock: std.posix.socket_t, expectedSeq: *u32, prng: *std.Ra
     // Only needed for random packet dropping, until we move that into it's own code path.
     const rand = prng.random();
     var dropRand: f64 = undefined;
-    const percent_drop: f64 = 1; // 1% chance
+    const percent_drop: f64 = 5; // 1% chance
 
-    var recv_buf: [1024]u8 = undefined;
+    var recv_buf: [sz]u8 = undefined;
     var pkt = packet.Packet{
         .src = sender.in,
         .dest = receiver.in,
@@ -147,7 +147,7 @@ fn send_window(sock: std.posix.socket_t, window: packet.PacketWindow) !u32 {
         _ = try std.posix.sendto(sock, send_buffer[0..n], 0, @ptrCast(&receiver.any), receiver.getOsSockLen());
     }
 
-    var buf: [1024]u8 = undefined;
+    var buf: [sz]u8 = undefined;
 
     const recv_len = std.posix.recvfrom(sock, @constCast(&buf), 0, null, null) catch |err| switch (err) {
         error.WouldBlock => { // Would block is how the timeout is represented for recvfrom.
@@ -180,7 +180,7 @@ fn send_window(sock: std.posix.socket_t, window: packet.PacketWindow) !u32 {
 }
 
 fn build_window(window: *packet.PacketWindow, f: std.fs.File) !void {
-    var buf: [1024 - 21]u8 = undefined;
+    var buf: [sz - 21]u8 = undefined;
     while (true) {
         if (!window.can_push()) {
             return;

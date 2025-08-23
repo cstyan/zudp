@@ -128,11 +128,6 @@ pub const Packet = struct {
     }
 };
 
-pub fn check_kind(bytes: []u8) !PacketType {
-    const kind_byte = bytes[12];
-    return try std.meta.intToEnum(PacketType, kind_byte);
-}
-
 const PacketData = struct {
     src: std.net.Ip4Address,
     dest: std.net.Ip4Address,
@@ -161,7 +156,7 @@ pub const PacketWindow = struct {
                 .kind = .{ .Data = .{
                     .seq = 0,
                     .len = 0,
-                    .data = try allocator.alloc(u8, 1024 - 21),
+                    .data = try allocator.alloc(u8, (1024 * 10) - 21),
                 } },
             };
         }
