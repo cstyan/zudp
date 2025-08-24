@@ -180,7 +180,7 @@ pub const PacketWindow = struct {
         pkt.dest = data.dest;
         kind_data.seq = data.seq;
         kind_data.len = data.data.len;
-        @memmove(kind_data.data[0..data.data.len], data.data);
+        @memcpy(kind_data.data[0..data.data.len], data.data);
 
         self.count += 1;
         self.next_seq += 1;

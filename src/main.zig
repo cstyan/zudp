@@ -157,6 +157,7 @@ fn send_window(sock: std.posix.socket_t, window: packet.PacketWindow) !u32 {
         else => return err,
     };
     if (recv_len == 0) {
+        @branchHint(.cold);
         // This shouldn't be possible since the socket is blocking, but lets just be safe.
         return error.NoAck;
     }
@@ -180,16 +181,18 @@ fn send_window(sock: std.posix.socket_t, window: packet.PacketWindow) !u32 {
 }
 
 fn build_window(window: *packet.PacketWindow, f: std.fs.File) !void {
-    var buf: [sz - 21]u8 = undefined;
-    while (true) {
-        if (!window.can_push()) {
-            return;
-        }
+    var buf: [(sz) - 21]u8 = undefined;
+
+    const available_slots = packet.window_size - window.count;
+    // Unrolled loop for window_size = 5 - eliminates all loop branch overhead
+    for (0..available_slots) |_| {
         const bytesRead = try f.read(buf[0..]);
-        if (bytesRead == 0) {
-            return error.ErrotEoT; // EOF reached
+        if (bytesRead > 0) {
+            window.push_data(.{ .src = sender.in, .dest = receiver.in, .seq = @intCast(window.next_seq), .data = buf[0..bytesRead] }) catch return;
+            continue;
         }
-        window.push_data(.{ .src = sender.in, .dest = receiver.in, .seq = @intCast(window.next_seq), .data = buf[0..bytesRead] }) catch break;
+
+        return error.ErrotEoT;
     }
 }
 
